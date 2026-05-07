@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Psychrometric Chart — Interactive</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .wrapper { width: 100%; max-width: 880px; }
+  .top-label {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #5DCAA5;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .subtitle { font-size: 13px; color: #484f58; margin-bottom: 18px; }
+  .chart-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .canvas-wrap { flex: 1; min-width: 300px; }
+  canvas {
+    width: 100%;
+    display: block;
+    border-radius: 10px;
+    border: 1px solid #21262d;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .drag-hint { text-align: center; font-size: 11px; color: #484f58; margin-top: 6px; transition: opacity 0.4s; }
+  .stats { display: flex; flex-direction: column; gap: 8px; width: 175px; min-width: 155px; }
+  .stat { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 10px 14px; }
+  .stat-label { font-size: 11px; color: #6e7681; margin-bottom: 3px; }
+  .stat-val { font-size: 22px; font-weight: 500; color: #e6edf3; }
+  .stat-sub { font-size: 11px; margin-top: 2px; color: #6e7681; }
+  .stat-temp { border-left: 3px solid #EF9F27; border-radius: 0 8px 8px 0; padding-left: 11px; }
+  .stat-dew  { border-left: 3px solid #7ee8ff; border-radius: 0 8px 8px 0; padding-left: 11px; }
+  .insight {
+    border-radius: 10px;
+    padding: 11px 15px;
+    margin-top: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    border: 1px solid #21262d;
+    color: #8b949e;
+    min-height: 42px;
+    background: #161b22;
+  }
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="top-label">Psychrometric Chart</div>
+  <div class="subtitle">Drag the dot to explore temperature, humidity, and VPD relationships</div>
+
+  <div class="chart-row">
+    <div class="canvas-wrap">
+      <canvas id="pc"></canvas>
+      <div class="drag-hint" id="drag-hint">drag the dot · or click anywhere on the chart</div>
+    </div>
+
+    <div class="stats">
+      <div class="stat stat-temp">
+        <div class="stat-label">Temperature</div>
+        <div class="stat-val" id="s-temp" style="color:#EF9F27;">—</div>
+        <div class="stat-sub" id="s-temp-sub"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Relative humidity</div>
+        <div class="stat-val" id="s-rh">—</div>
+        <div class="stat-sub" id="s-rh-sub"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">VPD</div>
+        <div class="stat-val" id="s-vpd">—</div>
+        <div class="stat-sub" id="s-vpd-sub"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Absolute humidity</div>
+        <div class="stat-val" id="s-ah">—</div>
+        <div class="stat-sub" style="color:#6e7681;">actual water in air</div>
+      </div>
+      <div class="stat stat-dew">
+        <div class="stat-label">Dew point</div>
+        <div class="stat-val" id="s-dew" style="color:#7ee8ff;">—</div>
+        <div class="stat-sub" id="s-dew-sub">temp air must reach to condense</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="insight" id="insight"></div>
+</div>
+
+<script>
+const canvas = document.getElementById('pc');
+const ctx = canvas.getContext('2d');
+const dpr = window.devicePixelRatio || 2;
+const CW = 560, CH = 380;
+canvas.width = CW * dpr;
+canvas.height = CH * dpr;
+canvas.style.width = '100%';
+canvas.style.height = 'auto';
+ctx.scale(dpr, dpr);
+
+const W = CW, H = CH;
+const PAD = { left:52, right:62, top:22, bottom:38 };
+const pw = W - PAD.left - PAD.right;
+const ph = H - PAD.top - PAD.bottom;
+const xMin=0, xMax=50, yMin=0, yMax=30;
+
+let dotT = 24, dotAH = 13, dragging = false;
+
+function satAH(T) {
+  const es = 0.6108 * Math.exp(17.27 * T / (T + 237.3));
+  return 1000 * 0.622 * es / (101.325 - es) * 1.2;
+}
+function vpdKpa(T, AH) {
+  const sat = satAH(T);
+  const rh = Math.min(AH / sat, 1);
+  const esat = 0.6108 * Math.exp(17.27 * T / (T + 237.3));
+  return Math.max(0, esat * (1 - rh));
+}
+function dewPoint(T, AH) {
+  let lo = -30, hi = T, mid;
+  for (let i = 0; i < 60; i++) { mid = (lo + hi) / 2; satAH(mid) < AH ? lo = mid : hi = mid; }
+  return mid;
+}
+function tx(t) { return PAD.left + (t - xMin) / (xMax - xMin) * pw; }
+function ty(ah) { return PAD.top + ph - (ah - yMin) / (yMax - yMin) * ph; }
+function fromX(px) { return Math.max(xMin, Math.min(xMax, xMin + (px - PAD.left) / pw * (xMax - xMin))); }
+function fromY(py) { return Math.max(yMin, Math.min(yMax, yMin + (PAD.top + ph - py) / ph * (yMax - yMin))); }
+
+function getRHInfo(rh) {
+  if (rh > 85) return { color:'#E24B4A', label:'Too humid' };
+  if (rh > 70) return { color:'#1D9E75', label:'Good range' };
+  if (rh > 40) return { color:'#378ADD', label:'Comfortable' };
+  return { color:'#EF9F27', label:'Very dry' };
+}
+function getVPDLabel(v) {
+  if (v < 0.4) return 'Very low — poor transpiration';
+  if (v < 0.8) return 'Low — mild stress';
+  if (v < 1.2) return 'Ideal plant range';
+  if (v < 1.6) return 'Moderate stress';
+  return 'High — drought stress';
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1a1f27'; ctx.fillRect(0, 0, W, H);
+
+  const gridCol = 'rgba(255,255,255,0.05)';
+  const axCol = '#6e7681';
+  const satCol = '#5DCAA5';
+
+  for (let t = 0; t <= 50; t += 5) {
+    ctx.strokeStyle = gridCol; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(tx(t), PAD.top); ctx.lineTo(tx(t), PAD.top + ph); ctx.stroke();
+    ctx.fillStyle = axCol; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(t + '°', tx(t), PAD.top + ph + 17);
+  }
+  for (let ah = 0; ah <= 30; ah += 5) {
+    ctx.strokeStyle = gridCol; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(PAD.left, ty(ah)); ctx.lineTo(PAD.left + pw, ty(ah)); ctx.stroke();
+    ctx.fillStyle = axCol; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(ah, PAD.left - 7, ty(ah) + 4);
+  }
+  ctx.fillStyle = axCol; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('dry-bulb temperature (°C)', PAD.left + pw / 2, H - 6);
+  ctx.save(); ctx.translate(14, PAD.top + ph / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText('absolute humidity (g/m³)', 0, 0); ctx.restore();
+
+  const vpdTicks = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
+  vpdTicks.forEach(v => {
+    const refT = 30;
+    const esat = 0.6108 * Math.exp(17.27 * refT / (refT + 237.3));
+    if (esat <= v) return;
+    const ah_at_ref = (1 - v / esat) * satAH(refT);
+    if (ah_at_ref < yMin || ah_at_ref > yMax) return;
+    const rightY = ty(ah_at_ref);
+    if (rightY < PAD.top || rightY > PAD.top + ph) return;
+    ctx.fillStyle = '#d29922'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText(v.toFixed(1), PAD.left + pw + 6, rightY + 4);
+  });
+  ctx.save(); ctx.translate(W - 7, PAD.top + ph / 2); ctx.rotate(Math.PI / 2);
+  ctx.fillStyle = '#d29922'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('VPD (kPa)', 0, 0); ctx.restore();
+
+  [20,30,40,50,60,70,80,90,100].forEach(rh => {
+    const isSat = rh === 100;
+    ctx.beginPath();
+    ctx.strokeStyle = isSat ? satCol : 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = isSat ? 2.5 : 1;
+    let started = false;
+    for (let T = xMin; T <= xMax; T += 0.3) {
+      const ah = (rh / 100) * satAH(T);
+      if (ah > yMax) { started = false; continue; }
+      if (!started) { ctx.moveTo(tx(T), ty(ah)); started = true; } else ctx.lineTo(tx(T), ty(ah));
+    }
+    ctx.stroke();
+  });
+
+  [{rh:20,T:8},{rh:30,T:11},{rh:40,T:14},{rh:50,T:17},
+   {rh:60,T:20},{rh:70,T:24},{rh:80,T:28},{rh:90,T:32},{rh:100,T:37}
+  ].forEach(({ rh, T }) => {
+    const isSat = rh === 100;
+    const labelAH = (rh / 100) * satAH(T);
+    if (labelAH < yMin + 0.3 || labelAH > yMax - 0.3) return;
+    const lx = tx(T), ly = ty(labelAH);
+    const boxW = isSat ? 38 : 30, boxH = 15;
+    ctx.fillStyle = isSat ? '#5DCAA5' : 'rgba(255,255,255,0.13)';
+    ctx.beginPath(); ctx.roundRect(lx - boxW/2, ly - boxH/2, boxW, boxH, 3); ctx.fill();
+    ctx.fillStyle = isSat ? '#04342C' : 'rgba(255,255,255,0.82)';
+    ctx.font = isSat ? 'bold 10px sans-serif' : '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(rh + '%', lx, ly + 3.5);
+  });
+
+  const cSat = satAH(dotT);
+  const cAH = Math.min(dotAH, cSat * 0.999);
+  const cRH = Math.min(99, (cAH / cSat) * 100);
+  const cVPD = vpdKpa(dotT, cAH);
+  const cDew = dewPoint(dotT, cAH);
+  const dewCol = '#7ee8ff';
+
+  const dewX = tx(cDew), dotY = ty(cAH);
+
+  ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = dewCol;
+  ctx.beginPath(); ctx.moveTo(tx(dotT), dotY); ctx.lineTo(dewX, dotY); ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.beginPath(); ctx.arc(dewX, dotY, 5, 0, Math.PI * 2);
+  ctx.fillStyle = dewCol; ctx.fill();
+  ctx.fillStyle = dewCol; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+  const labelOffY = dotY > PAD.top + 18 ? -10 : 16;
+  ctx.fillText(Math.round(cDew) + '°', dewX, dotY + labelOffY);
+
+  ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.strokeStyle = '#388bfd';
+  ctx.beginPath(); ctx.moveTo(PAD.left, ty(cAH)); ctx.lineTo(tx(dotT), ty(cAH)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(tx(dotT), PAD.top + ph); ctx.lineTo(tx(dotT), ty(cAH)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const cGap = cSat - cAH;
+  ctx.strokeStyle = '#d29922'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(tx(dotT), ty(cAH)); ctx.lineTo(tx(dotT), ty(cSat)); ctx.stroke();
+  [[ty(cSat), 1], [ty(cAH), -1]].forEach(([ay, dir]) => {
+    ctx.beginPath();
+    ctx.moveTo(tx(dotT), ay - dir * 2);
+    ctx.lineTo(tx(dotT) - 4, ay + dir * 7);
+    ctx.lineTo(tx(dotT) + 4, ay + dir * 7);
+    ctx.closePath(); ctx.fillStyle = '#d29922'; ctx.fill();
+  });
+  ctx.fillStyle = '#d29922'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('gap', tx(dotT) + 6, (ty(cAH) + ty(cSat)) / 2 + 4);
+
+  ctx.beginPath(); ctx.arc(tx(dotT), ty(cSat), 5, 0, Math.PI * 2);
+  ctx.fillStyle = satCol; ctx.fill();
+
+  ctx.beginPath(); ctx.arc(tx(dotT), ty(cAH), 11, 0, Math.PI * 2);
+  ctx.fillStyle = '#f78166'; ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(tx(dotT), ty(cAH), 11, 0, Math.PI * 2); ctx.stroke();
+
+  const rhInfo = getRHInfo(cRH);
+  document.getElementById('s-temp').textContent = Math.round(dotT) + '°C';
+  document.getElementById('s-ah').textContent = cAH.toFixed(1) + ' g/m³';
+  document.getElementById('s-rh').textContent = Math.round(cRH) + '%';
+  document.getElementById('s-rh').style.color = rhInfo.color;
+  document.getElementById('s-rh-sub').textContent = rhInfo.label;
+  document.getElementById('s-vpd').textContent = cVPD.toFixed(2) + ' kPa';
+  document.getElementById('s-vpd-sub').textContent = getVPDLabel(cVPD);
+  document.getElementById('s-dew').textContent = Math.round(cDew) + '°C';
+  document.getElementById('s-dew-sub').textContent = Math.round(dotT - cDew) + '° below current temp';
+
+  let insight = '';
+  if (cRH > 90) insight = 'Nearly saturated — dew point is very close to air temp. Condensation likely.';
+  else if (cRH > 70) insight = 'Good humidity. The dew point shows how much you can cool before condensation forms.';
+  else if (cRH > 50) insight = 'Comfortable range. Move horizontally (same AH) and the dew point stays fixed — only RH changes.';
+  else if (cRH > 30) insight = 'Dry air. Dew point is well below current temp — air can cool significantly before condensing.';
+  else insight = 'Very dry. Large gap between air temp and dew point means high evaporative demand.';
+  if (cVPD > 1.5) insight += ' VPD is high — significant plant stress zone.';
+  document.getElementById('insight').textContent = insight;
+}
+
+function getPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = CW / rect.width;
+  const scaleY = CH / rect.height;
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+}
+function applyPos(x, y) {
+  dotT = fromX(x);
+  dotAH = Math.min(fromY(y), satAH(dotT) * 0.999);
+  draw();
+}
+
+canvas.addEventListener('mousedown', e => { dragging=true; document.getElementById('drag-hint').style.opacity='0'; applyPos(getPos(e).x,getPos(e).y); });
+canvas.addEventListener('mousemove', e => { if(dragging) applyPos(getPos(e).x,getPos(e).y); });
+window.addEventListener('mouseup', () => { dragging=false; });
+canvas.addEventListener('touchstart', e => { e.preventDefault(); dragging=true; applyPos(getPos(e).x,getPos(e).y); }, {passive:false});
+canvas.addEventListener('touchmove', e => { e.preventDefault(); if(dragging) applyPos(getPos(e).x,getPos(e).y); }, {passive:false});
+window.addEventListener('touchend', () => { dragging=false; });
+
+draw();
+</script>
+</body>
+</html>
